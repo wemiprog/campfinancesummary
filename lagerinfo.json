@@ -7,5 +7,6 @@
   "anreise": "2026-05-22",
   "abreise": "2026-05-25",
   "verpflegungstage": 2.5,
-  "ort": "Ortenberg"
+  "ort": "Ortenberg",
+  "kueche_vom_haus": true
 }

@@ -36,7 +36,8 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 OUTPUT = ROOT / "output"
 ASSETS = ROOT / "assets"
-LOGO_DATEI = ASSETS / "headwaters-logo.png"
+LOGO_DATEI = ASSETS / "schriftzug_untertitel.jpg"
+BTP_ICON_DATEI = ASSETS / "btp_icon.png"
 LAGERINFO_DATEI = ROOT / "lagerinfo.json"
 
 MONATE = [
@@ -121,6 +122,8 @@ ERTRAG_GRUPPEN = [
 
 # UBS eBill: 40 Rappen pro eingehende Zahlung
 EBILL_GEBUEHR = 0.40
+# Wenn d Küche vom Huus chunnt und i de Miet steckt
+ESSEN_ANNAHME_PRO_TAG = 12.0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -186,6 +189,7 @@ class Lagerinfo:
     abreise: date
     verpflegungstage: float
     ort: str
+    kueche_vom_haus: bool = False
 
     @property
     def naechte(self) -> int:
@@ -219,6 +223,7 @@ class Lagerinfo:
             "abreise": self.abreise.isoformat(),
             "verpflegungstage": self.verpflegungstage,
             "ort": self.ort,
+            "kueche_vom_haus": self.kueche_vom_haus,
         }
 
     @classmethod
@@ -233,6 +238,7 @@ class Lagerinfo:
             abreise=date.fromisoformat(data["abreise"]),
             verpflegungstage=float(data["verpflegungstage"]),
             ort=data["ort"],
+            kueche_vom_haus=bool(data.get("kueche_vom_haus", False)),
         )
 
 
@@ -420,13 +426,15 @@ def lagerinfo_speichern(lager: Lagerinfo) -> None:
 
 def lager_zusammenfassung(lager: Lagerinfo) -> str:
     kind_txt = "½" if abs(lager.kind_faktor - 0.5) < 0.001 else str(lager.kind_faktor)
+    kueche = "Küche vom Haus (i de Miet)" if lager.kueche_vom_haus else "eigene Küche / Verpflegung"
     return (
         f"  {lager.name}\n"
         f"  {lager.ort}\n"
         f"  {lager.datum_text}\n"
         f"  {lager.naechte} Nächte · {lager.verpflegungstage:g} Verpflegungstage\n"
         f"  {lager.teilnehmer} Erwachsene + {lager.kinder} Kinder "
-        f"= {lager.koepfe} Köpfe, {lager.personen:g} Personen (Kinder {kind_txt})"
+        f"= {lager.koepfe} Köpfe, {lager.personen:g} Personen (Kinder {kind_txt})\n"
+        f"  {kueche}"
     )
 
 
@@ -858,13 +866,13 @@ A4 = pymupdf.paper_rect("a4")
 BELEGE_DIR = DATA / "Belege"
 BILD_ENDUNGEN = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 
-INK = (0.11, 0.11, 0.11)
-MUTED = (0.42, 0.45, 0.50)
-BLUE = (0.239, 0.431, 0.659)
-GREEN = (0.239, 0.478, 0.290)
-LOSS = (0.769, 0.361, 0.243)
-PAPER = (0.953, 0.961, 0.969)
-BAR_BG = (0.882, 0.902, 0.925)
+INK = (0.12, 0.13, 0.14)
+MUTED = (0.45, 0.48, 0.52)
+BLUE = (0.28, 0.42, 0.58)
+GREEN = (0.26, 0.48, 0.34)
+LOSS = (0.72, 0.36, 0.28)
+PAPER = (0.965, 0.968, 0.972)
+BAR_BG = (0.90, 0.91, 0.93)
 FONT_REG = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
 FONT_BOLD = Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf")
 
@@ -878,16 +886,24 @@ class Stift:
         self.bld = pymupdf.Font(fontfile=str(FONT_BOLD))
         page.insert_font("reg", fontfile=str(FONT_REG))
         page.insert_font("bld", fontfile=str(FONT_BOLD))
-        self.ml = 44.0
-        self.mr = page.rect.width - 44.0
+        self.ml = 48.0
+        self.mr = page.rect.width - 48.0
 
     @property
     def cx(self) -> float:
         return (self.ml + self.mr) / 2
 
-    def breite(self, text: str, size: float, bold: bool = False) -> float:
+    def breite(
+        self, text: str, size: float, bold: bool = False, tracking: float = 0.0
+    ) -> float:
         font = self.bld if bold else self.reg
-        return font.text_length(text, fontsize=size)
+        if not text:
+            return 0.0
+        if abs(tracking) < 1e-9:
+            return font.text_length(text, fontsize=size)
+        # tracking in em (relativ zur Schriftgrösse), z. B. 0.04 ≈ leicht gesperrt
+        extra = tracking * size
+        return sum(font.text_length(ch, fontsize=size) + extra for ch in text) - extra
 
     def text(
         self,
@@ -899,28 +915,36 @@ class Stift:
         bold: bool = False,
         color: tuple[float, float, float] = INK,
         align: str = "left",
+        tracking: float = 0.0,
     ) -> float:
         if not s:
             return 0.0
-        w = self.breite(s, size, bold)
+        w = self.breite(s, size, bold, tracking=tracking)
         if align == "right":
             x = x - w
         elif align == "center":
             x = x - w / 2
-        self.page.insert_text(
-            (x, y),
-            s,
-            fontname="bld" if bold else "reg",
-            fontsize=size,
-            color=color,
-        )
+        fontname = "bld" if bold else "reg"
+        if abs(tracking) < 1e-9:
+            self.page.insert_text(
+                (x, y), s, fontname=fontname, fontsize=size, color=color
+            )
+        else:
+            font = self.bld if bold else self.reg
+            extra = tracking * size
+            cursor = x
+            for ch in s:
+                self.page.insert_text(
+                    (cursor, y), ch, fontname=fontname, fontsize=size, color=color
+                )
+                cursor += font.text_length(ch, fontsize=size) + extra
         return w
 
     def kasten(
         self,
         rect: pymupdf.Rect,
         fill: tuple[float, float, float] = PAPER,
-        radius: float | None = 0.04,
+        radius: float | None = 0.03,
     ) -> None:
         if radius:
             self.page.draw_rect(rect, color=None, fill=fill, radius=radius)
@@ -933,19 +957,26 @@ class Stift:
         y: float,
         x1: float,
         color: tuple[float, float, float] = GREEN,
-        width: float = 1.2,
+        width: float = 0.9,
     ) -> None:
         self.page.draw_line(
             pymupdf.Point(x0, y), pymupdf.Point(x1, y), color=color, width=width
         )
 
-    def umbrechen(self, text: str, size: float, max_w: float, bold: bool = False) -> list[str]:
+    def umbrechen(
+        self,
+        text: str,
+        size: float,
+        max_w: float,
+        bold: bool = False,
+        tracking: float = 0.0,
+    ) -> list[str]:
         woerter = text.split()
         zeilen: list[str] = []
         aktuell = ""
         for wort in woerter:
             probe = f"{aktuell} {wort}".strip()
-            if self.breite(probe, size, bold) <= max_w:
+            if self.breite(probe, size, bold, tracking=tracking) <= max_w:
                 aktuell = probe
             else:
                 if aktuell:
@@ -1017,8 +1048,52 @@ def belege_zum_anhaengen(
     return andere, lebensmittel
 
 
+def a4_fit_rect(
+    src_w: float,
+    src_h: float,
+    *,
+    box: pymupdf.Rect | None = None,
+) -> pymupdf.Rect:
+    """Rechteck im Zielbereich, so dass die längere Seite anliegt (contain)."""
+    box = box or A4
+    max_w = box.width
+    max_h = box.height
+    if src_w <= 0 or src_h <= 0:
+        return pymupdf.Rect(box)
+    scale = min(max_w / src_w, max_h / src_h)
+    w, h = src_w * scale, src_h * scale
+    x0 = box.x0 + (max_w - w) / 2
+    y0 = box.y0 + (max_h - h) / 2
+    return pymupdf.Rect(x0, y0, x0 + w, y0 + h)
+
+
+def haenge_pdf_seiten_an(
+    doc: pymupdf.Document,
+    src: pymupdf.Document,
+    seiten: list[int] | None = None,
+    *,
+    beschriftung: str | None = None,
+) -> int:
+    """Jede Quellseite auf A4 zeigen — grössere Seite füllt A4, Rest bleibt proportional."""
+    indices = seiten if seiten is not None else list(range(src.page_count))
+    n = 0
+    for i in indices:
+        sp = src[i]
+        page = doc.new_page(width=A4.width, height=A4.height)
+        if beschriftung and n == 0:
+            stift = Stift(page)
+            stift.text(stift.ml, 28, beschriftung, size=8.5, color=MUTED)
+            box = pymupdf.Rect(0, 34, A4.width, A4.height)
+        else:
+            box = A4
+        dest = a4_fit_rect(sp.rect.width, sp.rect.height, box=box)
+        page.show_pdf_page(dest, src, i)
+        n += 1
+    return n
+
+
 def haenge_kontoauszuege_an(doc: pymupdf.Document, konten: list[Konto]) -> int:
-    """Bestehende Kontoauszug-PDFs joinen, leere Seiten weglassen."""
+    """Bestehende Kontoauszug-PDFs joinen, leere Seiten weglassen, auf A4 skalieren."""
     n = 0
     for konto in konten:
         if not konto.pdf:
@@ -1028,9 +1103,7 @@ def haenge_kontoauszuege_an(doc: pymupdf.Document, konten: list[Konto]) -> int:
         if not keep:
             src.close()
             continue
-        src.select(keep)
-        doc.insert_pdf(src)
-        n += src.page_count
+        n += haenge_pdf_seiten_an(doc, src, keep)
         src.close()
     return n
 
@@ -1046,20 +1119,22 @@ def haenge_datei_an(doc: pymupdf.Document, pfad: Path, beschriftung: str) -> int
     if suf == ".pdf":
         src = pymupdf.open(pfad)
         try:
-            before = doc.page_count
-            doc.insert_pdf(src)
-            return doc.page_count - before
+            return haenge_pdf_seiten_an(doc, src, beschriftung=beschriftung)
         finally:
             src.close()
     if suf in BILD_ENDUNGEN:
         page = doc.new_page(width=A4.width, height=A4.height)
         stift = Stift(page)
-        stift.text(stift.ml, 36, beschriftung, size=9, color=MUTED)
-        page.insert_image(
-            pymupdf.Rect(36, 54, A4.width - 36, A4.height - 36),
-            filename=str(pfad),
-            keep_proportion=True,
+        stift.text(stift.ml, 28, beschriftung, size=8.5, color=MUTED)
+        try:
+            pix = pymupdf.Pixmap(str(pfad))
+            iw, ih = float(pix.width), float(pix.height)
+        except Exception:
+            iw, ih = A4.width, A4.height - 40
+        dest = a4_fit_rect(
+            iw, ih, box=pymupdf.Rect(12, 34, A4.width - 12, A4.height - 18)
         )
+        page.insert_image(dest, filename=str(pfad), keep_proportion=True)
         return 1
     print(f"  überspringe Beleg {pfad.name}")
     return 0
@@ -1084,33 +1159,95 @@ def _neue_seite(doc: pymupdf.Document) -> Stift:
 
 
 def fusszeile(stift: Stift, lager: Lagerinfo, seite: int, total: int = 4) -> None:
-    y = stift.page.rect.height - 28
-    stift.text(stift.ml, y, f"HeadWaters · {lager.name}", size=8, color=MUTED)
-    stift.text(stift.mr, y, f"{seite} / {total}", size=8, color=MUTED, align="right")
+    y = stift.page.rect.height - 30
+    stift.linie(stift.ml, y - 10, stift.mr, color=(0.88, 0.89, 0.91), width=0.5)
+    stift.text(
+        stift.ml,
+        y,
+        f"HeadWaters · {lager.name}",
+        size=7.5,
+        color=MUTED,
+        tracking=0.02,
+    )
+    stift.text(
+        stift.mr,
+        y,
+        f"{seite} / {total}",
+        size=7.5,
+        color=MUTED,
+        align="right",
+        tracking=0.04,
+    )
+
+
+def bild_in_box(
+    page: pymupdf.Page,
+    pfad: Path,
+    box: pymupdf.Rect,
+    *,
+    align: str = "left",
+) -> pymupdf.Rect:
+    """Bild proportional in box einpassen; align left/right/center horizontal."""
+    pix = pymupdf.Pixmap(str(pfad))
+    iw, ih = float(pix.width), float(pix.height)
+    scale = min(box.width / iw, box.height / ih)
+    w, h = iw * scale, ih * scale
+    if align == "right":
+        x0 = box.x1 - w
+    elif align == "center":
+        x0 = box.x0 + (box.width - w) / 2
+    else:
+        x0 = box.x0
+    y0 = box.y0 + (box.height - h) / 2
+    dest = pymupdf.Rect(x0, y0, x0 + w, y0 + h)
+    page.insert_image(dest, filename=str(pfad), keep_proportion=True)
+    return dest
 
 
 def zeichne_marke(stift: Stift, x_right: float, y_top: float) -> None:
-    logo_h = 32.0
-    logo_w = logo_h * 1772 / 1100
-    img = pymupdf.Rect(x_right - logo_w - 86, y_top, x_right - 86, y_top + logo_h)
-    stift.page.insert_image(img, filename=str(LOGO_DATEI), keep_proportion=True)
-    tx = img.x1 + 7
-    stift.text(tx, y_top + 13, "HEADWATERS", size=10.5, bold=True)
-    stift.text(tx, y_top + 25, "QUELLGEBIET", size=6.2, color=MUTED)
+    """Original-HeadWaters-Schriftzug oben rechts."""
+    logo_h = 34.0
+    # Schriftzug ist breit (4688×1250)
+    logo_w = logo_h * 4688 / 1250
+    box = pymupdf.Rect(x_right - logo_w, y_top, x_right, y_top + logo_h)
+    bild_in_box(stift.page, LOGO_DATEI, box, align="right")
 
 
-def kopf(stift: Stift, lager: Lagerinfo, titel: str, untertitel: str | None = None) -> float:
-    zeichne_marke(stift, stift.mr, 30)
-    stift.text(stift.ml, 50, titel, size=26, bold=True)
+def kopf(
+    stift: Stift,
+    lager: Lagerinfo,
+    titel: str,
+    untertitel: str | None = None,
+    *,
+    lager_icon: Path | None = None,
+) -> float:
+    zeichne_marke(stift, stift.mr, 28)
+    text_x = stift.ml
+    titel_y = 54.0
+    if lager_icon and lager_icon.exists() and untertitel is not None:
+        icon_h = 46.0
+        icon_box = pymupdf.Rect(stift.ml, 28, stift.ml + icon_h, 28 + icon_h)
+        bild_in_box(stift.page, lager_icon, icon_box, align="left")
+        text_x = icon_box.x1 + 12
+        titel_y = 48.0
+    stift.text(text_x, titel_y, titel, size=24, bold=True, tracking=-0.01)
     if untertitel is not None:
-        stift.text(stift.ml, 72, untertitel, size=14, bold=True, color=(0.28, 0.28, 0.28))
-        return 86
-    return 64
+        stift.text(
+            text_x,
+            titel_y + 22,
+            untertitel,
+            size=13,
+            bold=True,
+            color=(0.32, 0.34, 0.36),
+            tracking=0.01,
+        )
+        return max(92.0, titel_y + 40)
+    return 68.0
 
 
 def _zeilenfarbe(betrag: float, voll: tuple[float, float, float]) -> tuple[float, float, float]:
     if abs(betrag) < 0.005:
-        return (0.62, 0.65, 0.68)
+        return (0.68, 0.70, 0.72)
     return voll
 
 
@@ -1123,77 +1260,106 @@ def zeichne_pl_karte(
     total: float,
     total_label: str,
 ) -> float:
-    pad = 16.0
+    pad_x = 20.0
+    pad_y = 18.0
     x0, x1 = stift.ml, stift.mr
-    inner_l = x0 + pad
-    inner_r = x1 - pad
-    y = y0 + 22
+    inner_l = x0 + pad_x
+    inner_r = x1 - pad_x
+    y = y0 + pad_y + 6
     start_y = y0
 
     zeilen_h = 0.0
     for _, nummern in gruppen:
-        zeilen_h += 16 + len(nummern) * 13 + 18
-    hoehe = 28 + zeilen_h + 26
-    stift.kasten(pymupdf.Rect(x0, y0, x1, y0 + hoehe), fill=PAPER, radius=0.025)
+        zeilen_h += 18 + len(nummern) * 14.5 + 20
+    hoehe = pad_y + 22 + zeilen_h + 40
+    stift.kasten(pymupdf.Rect(x0, y0, x1, y0 + hoehe), fill=PAPER, radius=0.02)
 
-    stift.text(stift.cx, y, kopftext.upper(), size=9, color=MUTED, align="center")
-    y += 18
+    stift.text(
+        stift.cx,
+        y,
+        kopftext.upper(),
+        size=8.5,
+        color=MUTED,
+        align="center",
+        tracking=0.18,
+    )
+    y += 20
 
     for gruppenname, nummern in gruppen:
-        stift.text(inner_l, y, gruppenname, size=10.5, bold=True)
-        y += 16
+        stift.text(inner_l, y, gruppenname, size=10, bold=True, tracking=0.01)
+        y += 15
         gruppe_total = 0.0
         for nr in nummern:
             betrag = konten[nr].saldo if nr in konten else 0.0
             gruppe_total += betrag
-            name = f"{nr} {KONTO_NAMEN.get(nr, konten[nr].name if nr in konten else nr)}"
+            name = f"{nr}  {KONTO_NAMEN.get(nr, konten[nr].name if nr in konten else nr)}"
             stift.text(
-                inner_l + 12,
+                inner_l + 10,
                 y,
                 name,
-                size=9.5,
+                size=9.2,
                 color=_zeilenfarbe(betrag, BLUE),
+                tracking=0.01,
             )
             stift.text(
                 inner_r,
                 y,
                 chf(betrag),
-                size=9.5,
+                size=9.2,
                 color=_zeilenfarbe(betrag, GREEN),
                 align="right",
+                tracking=0.02,
             )
-            y += 13
-        stift.linie(inner_l + 12, y - 9, inner_r, GREEN, 1.15)
+            y += 14.5
+        stift.linie(inner_l + 10, y - 10, inner_r, GREEN, 0.85)
         stift.text(
             inner_r,
-            y + 2,
+            y + 1,
             chf(gruppe_total),
-            size=10,
+            size=9.5,
             bold=True,
             color=GREEN,
             align="right",
+            tracking=0.02,
         )
-        y += 18
+        y += 20
 
     y += 4
-    stift.text(inner_l, y, total_label, size=12, bold=True)
-    stift.text(inner_r, y, chf(total), size=12, bold=True, color=GREEN, align="right")
+    stift.linie(inner_l, y, inner_r, GREEN, 1.35)
+    y += 16
+    stift.text(inner_l, y, total_label, size=11.5, bold=True, tracking=0.01)
+    stift.text(
+        inner_r,
+        y,
+        chf(total),
+        size=11.5,
+        bold=True,
+        color=GREEN,
+        align="right",
+        tracking=0.02,
+    )
     return start_y + hoehe
 
 
 def zeichne_seite_aufwand(doc: pymupdf.Document, a: Auswertung) -> None:
     stift = _neue_seite(doc)
     lager = a.lager
-    y = kopf(stift, lager, "Abrechnung", lager.name)
+    y = kopf(
+        stift,
+        lager,
+        "Abrechnung",
+        lager.name,
+        lager_icon=BTP_ICON_DATEI,
+    )
     meta = (
         f"Kostenstelle {lager.kostenstelle}  ·  {lager.ort}  ·  {lager.datum_text}  ·  "
         f"{lager.naechte} Nächte  ·  {lager.verpflegungstage:g} Verpflegungstage  ·  "
         f"{lager.koepfe} Personen ({lager.teilnehmer} Erwachsene, {lager.kinder} Kinder)"
     )
-    for zeile in stift.umbrechen(meta, 8.5, stift.mr - stift.ml):
-        stift.text(stift.ml, y, zeile, size=8.5, color=MUTED)
+    for zeile in stift.umbrechen(meta, 8.2, stift.mr - stift.ml, tracking=0.02):
+        stift.text(stift.ml, y, zeile, size=8.2, color=MUTED, tracking=0.02)
         y += 12
-    y += 8
+    y += 14
     zeichne_pl_karte(
         stift, y, "Aufwand", AUFWAND_GRUPPEN, a.konten, a.aufwand_total, "Total Aufwand"
     )
@@ -1209,19 +1375,29 @@ def _fazit_zeile(
     negativ: bool,
     note: str | None = None,
 ) -> float:
-    w_label = stift.breite(label + "  ", 13, True)
-    w_wert = stift.breite(wert, 14.5, True)
+    w_label = stift.breite(label + "  ", 12.5, True, tracking=0.01)
+    w_wert = stift.breite(wert, 13.5, True, tracking=0.02)
     x = stift.cx - (w_label + w_wert) / 2
-    stift.text(x, y, label + "  ", size=13, bold=True)
-    stift.text(x + w_label, y, wert, size=14.5, bold=True, color=LOSS if negativ else GREEN)
-    y += 14
+    stift.text(x, y, label + "  ", size=12.5, bold=True, tracking=0.01)
+    stift.text(
+        x + w_label,
+        y,
+        wert,
+        size=13.5,
+        bold=True,
+        color=LOSS if negativ else GREEN,
+        tracking=0.02,
+    )
+    y += 16
     if note:
-        for zeile in stift.umbrechen(note, 9, 420):
-            stift.text(stift.cx, y + 4, zeile, size=9, color=MUTED, align="center")
+        for zeile in stift.umbrechen(note, 8.5, 400, tracking=0.015):
+            stift.text(
+                stift.cx, y + 2, zeile, size=8.5, color=MUTED, align="center", tracking=0.015
+            )
             y += 12
-        y += 6
-    else:
         y += 10
+    else:
+        y += 14
     return y
 
 
@@ -1229,29 +1405,28 @@ def zeichne_seite_ertrag(doc: pymupdf.Document, a: Auswertung) -> None:
     stift = _neue_seite(doc)
     lager = a.lager
     y = zeichne_pl_karte(
-        stift, 36, "Ertrag", ERTRAG_GRUPPEN, a.konten, a.ertrag_total, "Total Ertrag"
+        stift, 40, "Ertrag", ERTRAG_GRUPPEN, a.konten, a.ertrag_total, "Total Ertrag"
     )
-    y += 28
-    # kleine Welle
+    y += 32
     cx, wy = stift.cx, y
     shape = stift.page.new_shape()
     shape.draw_bezier(
-        pymupdf.Point(cx - 90, wy),
-        pymupdf.Point(cx - 50, wy - 11),
-        pymupdf.Point(cx - 10, wy + 11),
-        pymupdf.Point(cx + 30, wy),
+        pymupdf.Point(cx - 72, wy),
+        pymupdf.Point(cx - 40, wy - 8),
+        pymupdf.Point(cx - 8, wy + 8),
+        pymupdf.Point(cx + 24, wy),
     )
     shape.draw_bezier(
-        pymupdf.Point(cx + 30, wy),
-        pymupdf.Point(cx + 55, wy - 10),
-        pymupdf.Point(cx + 75, wy + 8),
-        pymupdf.Point(cx + 90, wy - 2),
+        pymupdf.Point(cx + 24, wy),
+        pymupdf.Point(cx + 44, wy - 7),
+        pymupdf.Point(cx + 60, wy + 6),
+        pymupdf.Point(cx + 72, wy - 1),
     )
-    shape.finish(color=INK, width=1.6, closePath=False)
+    shape.finish(color=INK, width=1.25, closePath=False)
     shape.commit()
-    y += 28
-    stift.text(stift.cx, y, "Fazit", size=22, bold=True, align="center")
-    y += 28
+    y += 30
+    stift.text(stift.cx, y, "Fazit", size=20, bold=True, align="center", tracking=0.04)
+    y += 30
     y = _fazit_zeile(
         stift,
         y,
@@ -1259,7 +1434,7 @@ def zeichne_seite_ertrag(doc: pymupdf.Document, a: Auswertung) -> None:
         f"CHF {chf(a.saldo_jahr, False)}",
         negativ=a.saldo_jahr < 0,
         note=(
-            f"ohne Vorjahr, ohne Lagerspenden · Betrieb {chf(a.ertrag_ohne_vorjahr_ohne_spenden)}"
+            f"ohne Vorjahr, ohne Lagerspenden · Teilnehmerbeiträge {chf(a.ertrag_ohne_vorjahr_ohne_spenden)}"
             f" − Aufwand {chf(a.aufwand_total)}"
         ),
     )
@@ -1267,11 +1442,12 @@ def zeichne_seite_ertrag(doc: pymupdf.Document, a: Auswertung) -> None:
         stift.cx,
         y,
         f"Verwendete (allgemeine) Lagerspenden: CHF {chf(a.spenden, False)}",
-        size=10,
+        size=9.5,
         color=MUTED,
         align="center",
+        tracking=0.015,
     )
-    y += 22
+    y += 26
     y = _fazit_zeile(
         stift,
         y,
@@ -1282,12 +1458,12 @@ def zeichne_seite_ertrag(doc: pymupdf.Document, a: Auswertung) -> None:
     vor_col = LOSS if a.vorjahr < 0 else GREEN
     prefix = "Überschuss vom Vorjahr: "
     wert = f"CHF {chf(a.vorjahr, False)}"
-    w1 = stift.breite(prefix, 10)
-    w2 = stift.breite(wert, 10, True)
+    w1 = stift.breite(prefix, 9.5, tracking=0.015)
+    w2 = stift.breite(wert, 9.5, True, tracking=0.02)
     x = stift.cx - (w1 + w2) / 2
-    stift.text(x, y, prefix, size=10, color=MUTED)
-    stift.text(x + w1, y, wert, size=10, bold=True, color=vor_col)
-    y += 24
+    stift.text(x, y, prefix, size=9.5, color=MUTED, tracking=0.015)
+    stift.text(x + w1, y, wert, size=9.5, bold=True, color=vor_col, tracking=0.02)
+    y += 28
     _fazit_zeile(
         stift,
         y,
@@ -1296,6 +1472,78 @@ def zeichne_seite_ertrag(doc: pymupdf.Document, a: Auswertung) -> None:
         negativ=a.uebriges_geld < 0,
     )
     fusszeile(stift, lager, 2)
+
+
+def zeichne_icon_schuessel(page: pymupdf.Page, cx: float, cy: float, size: float = 28) -> None:
+    """Kleine Schüssel — Ersatz für 🍲, weil Emoji-Fonts in PDF unzuverlässig sind."""
+    s = size / 48
+    shape = page.new_shape()
+    # Schüssel (halbes Oval)
+    shape.draw_oval(pymupdf.Rect(cx - 17 * s, cy - 4 * s, cx + 17 * s, cy + 18 * s))
+    shape.finish(color=(0.79, 0.63, 0.15), fill=(0.95, 0.82, 0.48), width=1.4)
+    # Deckelrand
+    shape.draw_line(
+        pymupdf.Point(cx - 17 * s, cy - 2 * s),
+        pymupdf.Point(cx + 17 * s, cy - 2 * s),
+    )
+    shape.finish(color=(0.79, 0.63, 0.15), width=1.6, closePath=False)
+    # Dampf
+    for dx in (-7, 0, 7):
+        shape.draw_bezier(
+            pymupdf.Point(cx + dx * s, cy - 4 * s),
+            pymupdf.Point(cx + (dx - 3) * s, cy - 12 * s),
+            pymupdf.Point(cx + (dx + 3) * s, cy - 16 * s),
+            pymupdf.Point(cx + dx * s, cy - 20 * s),
+        )
+    shape.finish(color=GREEN, width=1.4, closePath=False)
+    # Inhaltspunkt
+    shape.draw_circle(pymupdf.Point(cx, cy + 5 * s), 2.8 * s)
+    shape.finish(color=None, fill=LOSS)
+    shape.commit()
+
+
+def zeichne_icon_bett(page: pymupdf.Page, cx: float, cy: float, size: float = 28) -> None:
+    """Kleines Bett — Ersatz für 🛌."""
+    s = size / 48
+    shape = page.new_shape()
+    # Matratze
+    shape.draw_rect(
+        pymupdf.Rect(cx - 18 * s, cy, cx + 18 * s, cy + 12 * s),
+        radius=0.12,
+    )
+    shape.finish(color=(0.54, 0.42, 0.29), fill=(0.77, 0.64, 0.52), width=1.3)
+    # Kissen
+    shape.draw_oval(pymupdf.Rect(cx - 16 * s, cy - 10 * s, cx - 2 * s, cy + 2 * s))
+    shape.finish(color=(0.54, 0.42, 0.29), fill=(0.91, 0.84, 0.77), width=1.1)
+    # Decke
+    shape.draw_rect(pymupdf.Rect(cx - 2 * s, cy + 1 * s, cx + 16 * s, cy + 10 * s))
+    shape.finish(color=None, fill=(0.55, 0.70, 0.82))
+    # Beine
+    shape.draw_line(pymupdf.Point(cx - 16 * s, cy + 12 * s), pymupdf.Point(cx - 16 * s, cy + 17 * s))
+    shape.draw_line(pymupdf.Point(cx + 16 * s, cy + 12 * s), pymupdf.Point(cx + 16 * s, cy + 17 * s))
+    shape.finish(color=(0.54, 0.42, 0.29), width=1.5, closePath=False)
+    shape.commit()
+
+
+def titel_mit_icon(
+    stift: Stift,
+    y: float,
+    titel: str,
+    icon: str,
+) -> float:
+    """Zentrierter Titel mit Schüssel- oder Bett-Icon links daneben."""
+    size = 18
+    tw = stift.breite(titel, size, bold=True, tracking=0.02)
+    gap = 12
+    icon_w = 28
+    total = icon_w + gap + tw
+    x0 = stift.cx - total / 2
+    if icon == "schuessel":
+        zeichne_icon_schuessel(stift.page, x0 + icon_w / 2, y - 5, size=26)
+    else:
+        zeichne_icon_bett(stift.page, x0 + icon_w / 2, y - 5, size=26)
+    stift.text(x0 + icon_w + gap, y, titel, size=size, bold=True, tracking=0.02)
+    return y + 26
 
 
 def zeichne_seite_pro_person(doc: pymupdf.Document, a: Auswertung) -> None:
@@ -1312,64 +1560,159 @@ def zeichne_seite_pro_person(doc: pymupdf.Document, a: Auswertung) -> None:
         "½" if abs(lager.kind_faktor - 0.5) < 0.001 else str(lager.kind_faktor).replace(".", ",")
     )
 
-    def block(y: float, titel: str, zeilen: list[str], ergebnis: str, hint: str) -> float:
-        stift.text(stift.cx, y, titel, size=20, bold=True, align="center")
-        y += 22
+    def block(
+        y: float,
+        titel: str,
+        icon: str,
+        zeilen: list[str],
+        ergebnis: str,
+        hint: str,
+    ) -> float:
+        y = titel_mit_icon(stift, y, titel, icon)
+        y += 4
         for z in zeilen:
-            stift.text(stift.cx, y, z, size=12, align="center")
-            y += 16
-        stift.text(stift.cx, y + 4, "ergibt", size=12, bold=True, align="center")
-        y += 22
-        stift.text(stift.cx, y, ergebnis, size=14.5, bold=True, align="center")
+            stift.text(stift.cx, y, z, size=11.5, align="center", tracking=0.01)
+            y += 18
+        stift.text(
+            stift.cx, y + 6, "ergibt", size=11, bold=True, align="center", tracking=0.06
+        )
+        y += 26
+        stift.text(
+            stift.cx, y, ergebnis, size=13.5, bold=True, align="center", tracking=0.015
+        )
         y += 18
-        for z in stift.umbrechen(hint, 9.5, 430):
-            stift.text(stift.cx, y, z, size=9.5, color=MUTED, align="center")
-            y += 13
-        return y + 18
+        if hint:
+            for z in stift.umbrechen(hint, 9, 400, tracking=0.015):
+                stift.text(
+                    stift.cx, y, z, size=9, color=MUTED, align="center", tracking=0.015
+                )
+                y += 13
+        return y + 24
 
     y = 70
+    essen_hint = (
+        "Die Küche wurde vom Haus übernommen — die Verpflegung steckt grösstenteils "
+        "in den Mietkosten. Hier nur die extra Lebensmittel."
+        if lager.kueche_vom_haus
+        else ""
+    )
     y = block(
         y,
         "Essenskosten",
+        "schuessel",
         [
             f"Ausgaben für Lebensmittel: {chf(lebensmittel)}",
             f"Personen (Kinder {kind_txt} gerechnet): {personen:g}",
             f"Tage: {lager.verpflegungstage:g}  ({lager.datum_text})",
         ],
         f"{chf(pro_tag)} pro Person und Tag",
-        "Die Küche wurde vom Haus übernommen — die Verpflegung steckt grösstenteils "
-        "in den Mietkosten. Hier nur die extra Lebensmittel.",
+        essen_hint,
     )
-    y = block(
-        y,
-        "Übernachtungskosten",
-        [
-            f"Mietkosten: {chf(miete)}",
-            f"Personen (Kinder {kind_txt} gerechnet): {personen:g}",
-            f"Nächte: {lager.naechte}  ({lager.datum_text})",
-        ],
-        f"{chf(pro_nacht)} pro Person und Nacht",
-        f"Teilzeitbesucher werden normal gerechnet. {lager.ort}",
+
+    # Übernachtung — bei Küche vom Haus erst erklären, dann Zahlen
+    y = titel_mit_icon(stift, y, "Übernachtungskosten", "bett")
+    y += 4
+    for z in [
+        f"Mietkosten: {chf(miete)}",
+        f"Personen (Kinder {kind_txt} gerechnet): {personen:g}",
+        f"Nächte: {lager.naechte}  ({lager.datum_text})",
+    ]:
+        stift.text(stift.cx, y, z, size=11.5, align="center", tracking=0.01)
+        y += 18
+
+    if lager.kueche_vom_haus:
+        essen_annahme = round(ESSEN_ANNAHME_PRO_TAG * personen * tage, 2)
+        miete_rein = round(miete - essen_annahme, 2)
+        pro_nacht_rein = miete_rein / personen / naechte
+        y += 4
+        for z in stift.umbrechen(
+            "Die Mietkosten enthalten die Hausküche.",
+            9,
+            400,
+            tracking=0.015,
+        ):
+            stift.text(stift.cx, y, z, size=9, color=MUTED, align="center", tracking=0.015)
+            y += 12
+        stift.text(
+            stift.cx, y + 6, "ergibt inkl. Verpflegung", size=11, bold=True, align="center", tracking=0.04
+        )
+        y += 26
+        stift.text(
+            stift.cx,
+            y,
+            f"{chf(pro_nacht)} pro Person und Nacht",
+            size=13.5,
+            bold=True,
+            align="center",
+            tracking=0.015,
+        )
+        y += 20
+        for z in stift.umbrechen(
+            f"Bei Annahme {chf(ESSEN_ANNAHME_PRO_TAG)} Essen pro Person und Tag "
+            f"werden {chf(essen_annahme)} abgezogen — ergibt reine Übernachtung:",
+            9,
+            420,
+            tracking=0.015,
+        ):
+            stift.text(stift.cx, y, z, size=9, color=MUTED, align="center", tracking=0.015)
+            y += 12
+        y += 6
+        stift.text(
+            stift.cx,
+            y,
+            f"{chf(pro_nacht_rein)} pro Person und Nacht",
+            size=12.5,
+            bold=True,
+            align="center",
+            tracking=0.015,
+        )
+        y += 18
+        hint = f"Teilzeitbesucher werden normal gerechnet. {lager.ort}"
+    else:
+        stift.text(
+            stift.cx, y + 6, "ergibt", size=11, bold=True, align="center", tracking=0.06
+        )
+        y += 26
+        stift.text(
+            stift.cx,
+            y,
+            f"{chf(pro_nacht)} pro Person und Nacht",
+            size=13.5,
+            bold=True,
+            align="center",
+            tracking=0.015,
+        )
+        y += 18
+        hint = f"Teilzeitbesucher werden normal gerechnet. {lager.ort}"
+
+    for z in stift.umbrechen(hint, 9, 400, tracking=0.015):
+        stift.text(stift.cx, y, z, size=9, color=MUTED, align="center", tracking=0.015)
+        y += 13
+    y += 24
+
+    stift.text(
+        stift.cx, y, "Einzelheiten", size=18, bold=True, align="center", tracking=0.02
     )
-    stift.text(stift.cx, y, "Einzelheiten", size=20, bold=True, align="center")
-    y += 22
+    y += 26
     for z in stift.umbrechen(
         "Auf den nächsten Seiten sind die kompletten Kontoauszüge mit den konkreten "
         "Ausgaben und Einnahmen zu sehen.",
-        11.5,
-        430,
+        11,
+        400,
+        tracking=0.01,
     ):
-        stift.text(stift.cx, y, z, size=11.5, align="center")
-        y += 16
-    y += 6
+        stift.text(stift.cx, y, z, size=11, align="center", tracking=0.01)
+        y += 17
+    y += 10
     for z in stift.umbrechen(
         "Die Belege der Aufwände folgen am Schluss, sortiert nach Ausgabengrösse — "
         "die Lebensmittelbelege ganz am Ende.",
-        11.5,
-        430,
+        11,
+        400,
+        tracking=0.01,
     ):
-        stift.text(stift.cx, y, z, size=11.5, align="center")
-        y += 16
+        stift.text(stift.cx, y, z, size=11, align="center", tracking=0.01)
+        y += 17
     fusszeile(stift, lager, 3)
 
 
@@ -1547,6 +1890,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--verpflegungstage", type=float, default=None)
     p.add_argument(
+        "--kueche-vom-haus",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Küche vom Haus (Verpflegung steckt in der Miete)",
+    )
+    p.add_argument(
         "--ja",
         action="store_true",
         help="Nicht nachfragen: lagerinfo.json oder alle Flags müssen vollständig sein",
@@ -1563,6 +1912,10 @@ def _datum_oder_none(text: str) -> date | None:
         raise SystemExit(f"Ungültigs Datum: {text}  (bitte TT.MM.JJJJ)")
 
 
+def _ja_nein(text: str) -> bool:
+    return text.strip().lower() in {"j", "ja", "y", "yes", "1", "true"}
+
+
 def lager_aus_teilen(
     *,
     name: str,
@@ -1574,6 +1927,7 @@ def lager_aus_teilen(
     kinder: int | None,
     kind_faktor: float | None,
     verpflegungstage: float | None,
+    kueche_vom_haus: bool = False,
 ) -> Lagerinfo | None:
     """Baut nur, wenn wirklich alles da ist — kei stille Standard-Köpfe."""
     if not name or not ort or anreise is None or abreise is None:
@@ -1598,6 +1952,7 @@ def lager_aus_teilen(
         abreise=abreise,
         verpflegungstage=float(verpflegungstage),
         ort=ort.strip(),
+        kueche_vom_haus=bool(kueche_vom_haus),
     )
 
 
@@ -1634,6 +1989,11 @@ def lagerinfo_abfragen(args: argparse.Namespace, gefundene_ks: str) -> Lagerinfo
         verpflegungstage=args.verpflegungstage
         if args.verpflegungstage is not None
         else (gespeichert.verpflegungstage if gespeichert and args.ja else None),
+        kueche_vom_haus=(
+            args.kueche_vom_haus
+            if args.kueche_vom_haus is not None
+            else (gespeichert.kueche_vom_haus if gespeichert and args.ja else False)
+        ),
     )
 
     if not interaktiv:
@@ -1646,6 +2006,8 @@ def lagerinfo_abfragen(args: argparse.Namespace, gefundene_ks: str) -> Lagerinfo
                 "  oder alle Flags: --lagername --ort --anreise --abreise "
                 "--teilnehmer --kinder --verpflegungstage"
             )
+        if args.kueche_vom_haus is not None and lager is not None:
+            lager.kueche_vom_haus = args.kueche_vom_haus
         if flag_lager:
             lagerinfo_speichern(lager)
         print(lager_zusammenfassung(lager))
@@ -1725,6 +2087,16 @@ def lagerinfo_abfragen(args: argparse.Namespace, gefundene_ks: str) -> Lagerinfo
             if args.kind_faktor is not None
             else (vorschlag.kind_faktor if vorschlag else 0.5),
         )
+        vorschlag_kueche = (
+            args.kueche_vom_haus
+            if args.kueche_vom_haus is not None
+            else (vorschlag.kueche_vom_haus if vorschlag else False)
+        )
+        kueche_txt = frage(
+            "  Küche vom Haus übernommen (Verpflegung in der Miete)? J/n",
+            "J" if vorschlag_kueche else "n",
+        )
+        kueche_vom_haus = _ja_nein(kueche_txt)
 
         lager = lager_aus_teilen(
             name=name,
@@ -1736,6 +2108,7 @@ def lagerinfo_abfragen(args: argparse.Namespace, gefundene_ks: str) -> Lagerinfo
             kinder=kinder,
             kind_faktor=kind_faktor,
             verpflegungstage=verpflegungstage,
+            kueche_vom_haus=kueche_vom_haus,
         )
         if lager is None:
             print("   → Da fählt öppis oder d Zahle stimme nid. No einisch.")
@@ -1827,6 +2200,8 @@ def main() -> None:
 
     if not LOGO_DATEI.exists():
         raise SystemExit(f"Logo fehlt: {LOGO_DATEI}")
+    if not BTP_ICON_DATEI.exists():
+        raise SystemExit(f"Lager-Icon fehlt: {BTP_ICON_DATEI}")
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     print("→ Baue PDF …")

@@ -1,0 +1,11 @@
+---
+description: Always use uv for Python, never venv or pip
+alwaysApply: true
+---
+
+# Python: uv only
+
+- Use `uv` for all Python work: `uv init`, `uv add`, `uv run`, `uv sync`.
+- Never create a `.venv` with `python -m venv` or `virtualenv`.
+- Never install with `pip` / `pip3` (no `--break-system-packages` either).
+- Run scripts with `uv run python ...` so dependencies come from the project env uv manages.

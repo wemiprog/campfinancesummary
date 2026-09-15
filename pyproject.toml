@@ -1,0 +1,12 @@
+[project]
+name = "campfinancesummary"
+version = "1.0.0"
+description = "HeadWaters Lagerabrechnung als druckbares HTML"
+requires-python = ">=3.12"
+dependencies = [
+    "openpyxl>=3.1",
+    "pymupdf>=1.24",
+]
+
+[tool.uv]
+package = false

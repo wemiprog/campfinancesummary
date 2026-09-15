@@ -1,0 +1,11 @@
+{
+  "name": "Bibeltage Pfingsten 2026",
+  "kostenstelle": "C-BTP",
+  "teilnehmer": 92,
+  "kinder": 14,
+  "kind_faktor": 0.5,
+  "anreise": "2026-05-22",
+  "abreise": "2026-05-25",
+  "verpflegungstage": 2.5,
+  "ort": "Ortenberg"
+}

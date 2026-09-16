@@ -1,12 +1,54 @@
-{
-  "name": "Bibeltage Pfingsten 2026",
-  "kostenstelle": "C-BTP",
-  "teilnehmer": 92,
-  "kinder": 14,
-  "kind_faktor": 0.5,
-  "anreise": "2026-05-22",
-  "abreise": "2026-05-25",
-  "verpflegungstage": 2.5,
-  "ort": "Ortenberg",
-  "kueche_vom_haus": true
-}
+[
+  {
+    "name": "Bibeltage Pfingsten 2026",
+    "kostenstelle": "C-BTP",
+    "teilnehmer": 92,
+    "kinder": 14,
+    "kind_faktor": 0.5,
+    "anreise": "2026-05-22",
+    "abreise": "2026-05-25",
+    "verpflegungstage": 2.5,
+    "ort": "Ortenberg",
+    "kueche_vom_haus": true,
+    "team_beitrag_max": null
+  },
+  {
+    "name": "Youth Bible Camp 2026",
+    "kostenstelle": "C-YBC",
+    "teilnehmer": 54,
+    "kinder": 5,
+    "kind_faktor": 0.5,
+    "anreise": "2026-07-18",
+    "abreise": "2026-07-25",
+    "verpflegungstage": 7.0,
+    "ort": "Pension Rösliwies, Wildhaus",
+    "kueche_vom_haus": false,
+    "team_beitrag_max": null
+  },
+  {
+    "name": "Family Bible Camp 2026",
+    "kostenstelle": "C-FBC",
+    "teilnehmer": 82,
+    "kinder": 66,
+    "kind_faktor": 0.5,
+    "anreise": "2026-07-26",
+    "abreise": "2026-08-01",
+    "verpflegungstage": 5.7,
+    "ort": "Grischalodge, Parpan",
+    "kueche_vom_haus": false,
+    "team_beitrag_max": 400.0
+  },
+  {
+    "name": "Mini-OBC 2026",
+    "kostenstelle": "C-OBC",
+    "teilnehmer": 19,
+    "kinder": 0,
+    "kind_faktor": 0.5,
+    "anreise": "2026-08-22",
+    "abreise": "2026-08-24",
+    "verpflegungstage": 2.0,
+    "ort": "Hubelweide ob Reutigen",
+    "kueche_vom_haus": false,
+    "team_beitrag_max": null
+  }
+]

@@ -21,6 +21,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass
+from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
@@ -38,7 +39,27 @@ OUTPUT = ROOT / "output"
 ASSETS = ROOT / "assets"
 LOGO_DATEI = ASSETS / "schriftzug_untertitel.jpg"
 BTP_ICON_DATEI = ASSETS / "btp_icon.png"
+YBC_ICON_DATEI = ASSETS / "ybc_icon.png"
+FBC_ICON_DATEI = ASSETS / "fbc_icon.png"
+OBC_ICON_DATEI = ASSETS / "obc_icon.png"
 LAGERINFO_DATEI = ROOT / "lagerinfo.json"
+
+# Lager-Icons nach Kostenstelle
+LAGER_ICONS = {
+    "C-BTP": BTP_ICON_DATEI,
+    "C-YBC": YBC_ICON_DATEI,
+    "C-FBC": FBC_ICON_DATEI,
+    "C-OBC": OBC_ICON_DATEI,
+}
+
+# Text-Hinweise für Zahlungen ohne Kostenstelle (TWINT/RaiseNow)
+LAGER_HINWEISE = {
+    "C-BTP": ("btp", "pfingst", "bibeltage"),
+    "C-YBC": ("ybc", "youth bible", "youthbible"),
+    "C-FBC": ("fbc", "family bible", "familybible", "familien"),
+    "C-OBC": ("obc", "outdoor bible", "outdoorbible", "mobc"),
+}
+ALLE_LAGER_KUERZEL = ("btp", "fbc", "iglu", "ybc", "juko", "obc", "jidun", "diagonal", "wes")
 
 MONATE = [
     "",
@@ -190,6 +211,9 @@ class Lagerinfo:
     verpflegungstage: float
     ort: str
     kueche_vom_haus: bool = False
+    # Bis inkl. diesem Netto-Betrag pro Paycode = Team, darüber = Familien
+    # (None = keine Aufteilung auf der Zahlungsseite)
+    team_beitrag_max: float | None = None
 
     @property
     def naechte(self) -> int:
@@ -224,10 +248,12 @@ class Lagerinfo:
             "verpflegungstage": self.verpflegungstage,
             "ort": self.ort,
             "kueche_vom_haus": self.kueche_vom_haus,
+            "team_beitrag_max": self.team_beitrag_max,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Lagerinfo":
+        team_max = data.get("team_beitrag_max")
         return cls(
             name=data["name"],
             kostenstelle=data["kostenstelle"],
@@ -239,6 +265,7 @@ class Lagerinfo:
             verpflegungstage=float(data["verpflegungstage"]),
             ort=data["ort"],
             kueche_vom_haus=bool(data.get("kueche_vom_haus", False)),
+            team_beitrag_max=float(team_max) if team_max is not None else None,
         )
 
 
@@ -253,6 +280,31 @@ class Zahlungsmethode:
 
 
 @dataclass
+class BeitragsInfo:
+    """Netto-Teilnehmerbeiträge nach Paycode + Ausgänge auf 3500."""
+
+    team_volumen: float = 0.0
+    team_anzahl: int = 0
+    familien_volumen: float = 0.0
+    familien_anzahl: int = 0
+    team_grenze: float | None = None
+    reduktion_volumen: float = 0.0
+    reduktion_anzahl: int = 0
+    rueckerstattung_volumen: float = 0.0
+    rueckerstattung_anzahl: int = 0
+
+    @property
+    def hat_aufteilung(self) -> bool:
+        return self.team_grenze is not None and (
+            self.team_anzahl > 0 or self.familien_anzahl > 0
+        )
+
+    @property
+    def hat_rueckzahlungen(self) -> bool:
+        return self.reduktion_anzahl > 0 or self.rueckerstattung_anzahl > 0
+
+
+@dataclass
 class Auswertung:
     lager: Lagerinfo
     buchungen: list[Buchung]
@@ -262,12 +314,15 @@ class Auswertung:
     ertrag_ohne_vorjahr: float
     ertrag_ohne_vorjahr_ohne_spenden: float
     spenden: float
+    spenden_lager: float
+    missionsabend_spenden: float
     vorjahr: float
     saldo_jahr: float
     ueberschuss_jahr: float
     uebriges_geld: float
     zahlungen: list[Zahlungsmethode]
     kosten_nach_konto: list[tuple[str, str, float]]
+    beitraege: BeitragsInfo
 
 
 # ─────────────────────────────────────────────────────────────
@@ -406,20 +461,56 @@ def frage_datum(prompt: str, default: date | None = None) -> date:
             print("   → Bitte als TT.MM.JJJJ, z. B. 22.05.2026")
 
 
-def lagerinfo_laden() -> Lagerinfo | None:
+def lagerinfo_alle_laden() -> list[Lagerinfo]:
+    """Liest alle Lager us lagerinfo.json (Array oder einzelnes Objekt)."""
     if not LAGERINFO_DATEI.exists():
-        return None
+        return []
     try:
         data = json.loads(LAGERINFO_DATEI.read_text(encoding="utf-8"))
-        return Lagerinfo.from_dict(data)
-    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+    except json.JSONDecodeError as exc:
         print(f"  Hinweis: {LAGERINFO_DATEI.name} isch nid lesbar ({exc}).")
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        print(f"  Hinweis: {LAGERINFO_DATEI.name} sött es Array si.")
+        return []
+    lager: list[Lagerinfo] = []
+    for eintrag in data:
+        try:
+            lager.append(Lagerinfo.from_dict(eintrag))
+        except (KeyError, ValueError, TypeError) as exc:
+            print(f"  Hinweis: Lager-Eintrag übersprungen ({exc}).")
+    return lager
+
+
+def lagerinfo_laden(kostenstelle: str | None = None) -> Lagerinfo | None:
+    """Ein Lager: nach Kostenstelle, sunsch s letschte im Array."""
+    alle = lagerinfo_alle_laden()
+    if not alle:
         return None
+    if kostenstelle:
+        ks = kostenstelle.upper()
+        for lager in alle:
+            if lager.kostenstelle.upper() == ks:
+                return lager
+    return alle[-1]
 
 
 def lagerinfo_speichern(lager: Lagerinfo) -> None:
+    """Lager i Array schriibe / aktualisiere (Match über Kostenstelle)."""
+    alle = lagerinfo_alle_laden()
+    ersetzt = False
+    for i, alt in enumerate(alle):
+        if alt.kostenstelle.upper() == lager.kostenstelle.upper():
+            alle[i] = lager
+            ersetzt = True
+            break
+    if not ersetzt:
+        alle.append(lager)
+    payload = [l.as_dict() for l in alle]
     LAGERINFO_DATEI.write_text(
-        json.dumps(lager.as_dict(), indent=2, ensure_ascii=False) + "\n",
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 
@@ -560,7 +651,6 @@ def pl_aus_journal(buchungen: list[Buchung]) -> dict[str, dict]:
 # ─────────────────────────────────────────────────────────────
 
 BANK_KONTEN = {"1000", "1021", "1022", "1024", "1090", "1091"}
-ANDERE_LAGER = ("fbc", "iglu", "ybc", "juko", "obc", "jidun", "diagonal", "wes")
 
 
 def ist_ebill_betreff(text: str) -> bool:
@@ -569,17 +659,84 @@ def ist_ebill_betreff(text: str) -> bool:
     return "ebill" in t
 
 
+def paycode_aus_buchung(b: Buchung) -> str:
+    """Vierstelliger Paycode aus Beleg-Nr. oder Buchungstext."""
+    beleg = (b.beleg_nr or "").strip().upper()
+    if re.fullmatch(r"[A-Z0-9]{4}", beleg):
+        return beleg
+    m = re.search(r"[-–]\s*([A-Z0-9]{4})\s*$", b.text.strip())
+    if m:
+        return m.group(1).upper()
+    m = re.search(
+        r"(?:FBC|BTP|YBC|OBC|TB|MOBC)\s+([A-Z0-9]{4})\b",
+        b.text.upper(),
+    )
+    if m:
+        return m.group(1)
+    return ""
+
+
 def paycodes_aus_buchungen(buchungen: list[Buchung]) -> set[str]:
     """Vierstelliger alphanumerischer Paycode (Beleg-Nr. oder am Schluss vom Titel)."""
-    codes: set[str] = set()
+    return {c for b in buchungen if (c := paycode_aus_buchung(b))}
+
+
+def ist_beitrags_reduktion(text: str) -> bool:
+    """Nachträgliche Ermässigung/Reduktion vs. echte Rückerstattung.
+
+    Banktexte kommen oft zerlegt («ERM S // SIGUNG» statt «Ermässigung»).
+    """
+    t = (text or "").lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+    return bool(re.search(r"ermaess|erm\s*s|reduktion", t))
+
+
+def analysiere_beitraege(
+    buchungen: list[Buchung],
+    team_beitrag_max: float | None = None,
+) -> BeitragsInfo:
+    """Netto je Paycode auf 3500; Ausgänge als Reduktion oder Rückerstattung."""
+    info = BeitragsInfo(team_grenze=team_beitrag_max)
+    nach_code: dict[str, float] = defaultdict(float)
+
     for b in buchungen:
-        beleg = (b.beleg_nr or "").strip().upper()
-        if re.fullmatch(r"[A-Z0-9]{4}", beleg):
-            codes.add(beleg)
-        m = re.search(r"[-–]\s*([A-Z0-9]{4})\s*$", b.text.strip())
-        if m:
-            codes.add(m.group(1).upper())
-    return codes
+        soll = konto_nr(b.soll)
+        haben = konto_nr(b.haben)
+        if soll != "3500" and haben != "3500":
+            continue
+        code = paycode_aus_buchung(b)
+        if not code:
+            continue
+        if haben == "3500":
+            nach_code[code] += b.betrag
+        elif soll == "3500":
+            nach_code[code] -= b.betrag
+            if ist_beitrags_reduktion(b.text):
+                info.reduktion_volumen += b.betrag
+                info.reduktion_anzahl += 1
+            else:
+                info.rueckerstattung_volumen += b.betrag
+                info.rueckerstattung_anzahl += 1
+
+    info.reduktion_volumen = round(info.reduktion_volumen, 2)
+    info.rueckerstattung_volumen = round(info.rueckerstattung_volumen, 2)
+
+    if team_beitrag_max is None:
+        return info
+
+    for netto in nach_code.values():
+        netto = round(netto, 2)
+        if netto <= 0:
+            continue
+        if netto <= team_beitrag_max:
+            info.team_volumen += netto
+            info.team_anzahl += 1
+        else:
+            info.familien_volumen += netto
+            info.familien_anzahl += 1
+
+    info.team_volumen = round(info.team_volumen, 2)
+    info.familien_volumen = round(info.familien_volumen, 2)
+    return info
 
 
 def rechnungsnummern_aus_xlsx(xlsx_dir: Path, kostenstelle: str) -> set[str]:
@@ -621,27 +778,39 @@ def text_hat_rechnungsnr(text: str, nummern: set[str]) -> bool:
     return False
 
 
-def ist_lager_hinweis(text: str) -> bool:
-    """TWINT/RaiseNow het oft kei Paycode, aber «BTP» / «Pfingsten» im Text."""
+def lager_schluessel(kostenstelle: str) -> tuple[str, ...]:
+    return LAGER_HINWEISE.get(kostenstelle.upper(), ())
+
+
+def ist_lager_hinweis(text: str, kostenstelle: str) -> bool:
+    """TWINT/RaiseNow het oft kei Paycode, aber Lagerkürzel / Name im Text."""
     t = text.lower()
     if "spende" in t:
         return False
-    if any(x in t for x in ANDERE_LAGER) and not re.search(r"\bbtp\b", t):
+    schluessel = lager_schluessel(kostenstelle)
+    if not schluessel:
         return False
-    return bool(re.search(r"\bbtp\b", t) or "pfingst" in t or "bibeltage" in t)
+    for s in schluessel:
+        if len(s) <= 4:
+            if re.search(rf"\b{re.escape(s)}\b", t):
+                return True
+        elif s in t:
+            return True
+    return False
 
 
 def gehoert_zum_lager(
-    b: Buchung, paycodes: set[str], rechnungen: set[str]
+    b: Buchung,
+    paycodes: set[str],
+    rechnungen: set[str],
+    kostenstelle: str,
 ) -> bool:
     if text_hat_paycode(b.text, paycodes) or text_hat_rechnungsnr(b.text, rechnungen):
         return True
     soll = konto_nr(b.soll)
-    # RaiseNow/TWINT: Name + «BTP», ohni Paycode
-    if soll == "1091" and ist_lager_hinweis(b.text):
+    if soll == "1091" and ist_lager_hinweis(b.text, kostenstelle):
         return True
-    # UBS/Kasse ohni Paycode, aber klar BTP
-    if soll in {"1021", "1000"} and ist_lager_hinweis(b.text):
+    if soll in {"1021", "1000"} and ist_lager_hinweis(b.text, kostenstelle):
         return True
     return False
 
@@ -650,6 +819,7 @@ def analysiere_zahlungen(
     buchungen: list[Buchung],
     eingaenge: list[Buchung],
     rechnungen: set[str] | None = None,
+    kostenstelle: str = "",
 ) -> list[Zahlungsmethode]:
     """Wie d Teilnehmerbeiträg aacho si — Überwysig mit/ohni eBill separat."""
     paycodes = paycodes_aus_buchungen(buchungen)
@@ -691,7 +861,7 @@ def analysiere_zahlungen(
         # nume Iigäng, kei Usgäng/Rückerstattige
         if haben_nr in BANK_KONTEN:
             continue
-        if not gehoert_zum_lager(b, paycodes, rechnungen):
+        if not gehoert_zum_lager(b, paycodes, rechnungen, kostenstelle):
             continue
         if soll_nr == "1091":
             twint_volumen += b.betrag
@@ -763,6 +933,21 @@ def analysiere_zahlungen(
 # Auswertung zusammenbauen
 # ─────────────────────────────────────────────────────────────
 
+def missionsabend_aus_buchungen(buchungen: list[Buchung], spenden: float) -> float:
+    """Grösster 4900-Betrag, falls er durch 3400-Spenden gedeckt ist (Durchlauf)."""
+    betraege = [
+        b.betrag
+        for b in buchungen
+        if konto_nr(b.soll) == "4900" and b.betrag > 0
+    ]
+    if not betraege or spenden <= 0:
+        return 0.0
+    groesster = max(betraege)
+    if groesster <= spenden + 0.001:
+        return round(groesster, 2)
+    return 0.0
+
+
 def auswerten(
     lager: Lagerinfo,
     buchungen: list[Buchung],
@@ -800,12 +985,16 @@ def auswerten(
     ertrag = round(sum(netto(nr) for nr in pl if nr.startswith("3")), 2)
     vorjahr = netto("3610")
     spenden = netto("3400")
+    missionsabend = missionsabend_aus_buchungen(buchungen, spenden)
+    spenden_lager = round(spenden - missionsabend, 2)
     ertrag_ohne_vorjahr = round(ertrag - vorjahr, 2)
     ertrag_ohne_spenden = round(ertrag_ohne_vorjahr - spenden, 2)
 
-    # Saldo ohne Vorjahr und ohne Spenden — Spenden werden separat gezeigt
-    saldo_jahr = round(ertrag_ohne_spenden - aufwand, 2)
-    ueberschuss_jahr = round(saldo_jahr + spenden, 2)
+    # Saldo: Betrieb ohne Vorjahr, ohne Spenden, ohne Missionsabend-Durchlauf (4900)
+    aufwand_saldo = round(aufwand - missionsabend, 2)
+    saldo_jahr = round(ertrag_ohne_spenden - aufwand_saldo, 2)
+    # Überschuss: Saldo + Lagerspenden; Missionsabend ein/aus = 0
+    ueberschuss_jahr = round(saldo_jahr + spenden_lager, 2)
     uebriges_geld = round(ueberschuss_jahr + vorjahr, 2)
 
     kosten = []
@@ -826,12 +1015,17 @@ def auswerten(
         ertrag_ohne_vorjahr=ertrag_ohne_vorjahr,
         ertrag_ohne_vorjahr_ohne_spenden=ertrag_ohne_spenden,
         spenden=spenden,
+        spenden_lager=spenden_lager,
+        missionsabend_spenden=missionsabend,
         vorjahr=vorjahr,
         saldo_jahr=saldo_jahr,
         ueberschuss_jahr=ueberschuss_jahr,
         uebriges_geld=uebriges_geld,
-        zahlungen=analysiere_zahlungen(buchungen, eingaenge or [], rechnungen),
+        zahlungen=analysiere_zahlungen(
+            buchungen, eingaenge or [], rechnungen, lager.kostenstelle
+        ),
         kosten_nach_konto=kosten,
+        beitraege=analysiere_beitraege(buchungen, lager.team_beitrag_max),
     )
 
 
@@ -845,7 +1039,8 @@ def seite_hat_buchung(text: str) -> bool:
 
 
 def pdfs_zum_anhaengen(konten: dict[str, Konto]) -> list[Konto]:
-    """Nur Konten mit echten Buchungen, schön sortiert."""
+    """Nur Aufwand-/Ertrags-/Transferkonten — Bankkonten (z. B. UBS) weglassen,
+    die gleichen Buchungen stecken schon in den Gegenkonten."""
 
     def sort_key(k: Konto) -> tuple:
         kat = {"Aufwand": 0, "Ertrag": 1, "Aktiv": 2, "Passiv": 3}.get(k.kategorie, 9)
@@ -858,7 +1053,7 @@ def pdfs_zum_anhaengen(konten: dict[str, Konto]) -> list[Konto]:
     return [
         k
         for k in sorted(konten.values(), key=sort_key)
-        if k.pdf and k.hat_buchungen
+        if k.pdf and k.hat_buchungen and k.nummer not in BANK_KONTEN
     ]
 
 
@@ -1349,7 +1544,7 @@ def zeichne_seite_aufwand(doc: pymupdf.Document, a: Auswertung) -> None:
         lager,
         "Abrechnung",
         lager.name,
-        lager_icon=BTP_ICON_DATEI,
+        lager_icon=LAGER_ICONS.get(lager.kostenstelle.upper()),
     )
     meta = (
         f"Kostenstelle {lager.kostenstelle}  ·  {lager.ort}  ·  {lager.datum_text}  ·  "
@@ -1435,19 +1630,31 @@ def zeichne_seite_ertrag(doc: pymupdf.Document, a: Auswertung) -> None:
         negativ=a.saldo_jahr < 0,
         note=(
             f"ohne Vorjahr, ohne Lagerspenden · Teilnehmerbeiträge {chf(a.ertrag_ohne_vorjahr_ohne_spenden)}"
-            f" − Aufwand {chf(a.aufwand_total)}"
+            f" − Aufwand {chf(a.aufwand_total - a.missionsabend_spenden)}"
         ),
     )
     stift.text(
         stift.cx,
         y,
-        f"Verwendete (allgemeine) Lagerspenden: CHF {chf(a.spenden, False)}",
+        f"Lagerspenden: CHF {chf(a.spenden_lager, False)}",
         size=9.5,
         color=MUTED,
         align="center",
         tracking=0.015,
     )
-    y += 26
+    y += 18
+    if a.missionsabend_spenden > 0.005:
+        stift.text(
+            stift.cx,
+            y,
+            f"Missionsabendspenden (ein und ausgehend): CHF {chf(a.missionsabend_spenden, False)}",
+            size=9.5,
+            color=MUTED,
+            align="center",
+            tracking=0.015,
+        )
+        y += 18
+    y += 8
     y = _fazit_zeile(
         stift,
         y,
@@ -1752,8 +1959,13 @@ def zeichne_seite_zahlungen(doc: pymupdf.Document, a: Auswertung) -> None:
     right0, right1 = mid + gap / 2, stift.mr
     n_m = max(1, len(a.zahlungen))
     n_k = max(1, len(a.kosten_nach_konto))
-    card_h = max(56 + 44 + n_m * 54 + 36, 56 + 40 + n_k * 40) + 12
-    bottom = y_top + card_h
+    extra = 0
+    if a.beitraege.hat_aufteilung:
+        extra += 78
+    if a.beitraege.hat_rueckzahlungen:
+        extra += 78
+    card_h = max(56 + 44 + n_m * 54 + 36 + extra, 56 + 40 + n_k * 40) + 12
+    bottom = min(y_top + card_h, stift.page.rect.height - 40)
     stift.kasten(pymupdf.Rect(left0, y_top, left1, bottom), radius=0.03)
     stift.kasten(pymupdf.Rect(right0, y_top, right1, bottom), radius=0.03)
 
@@ -1796,6 +2008,58 @@ def zeichne_seite_zahlungen(doc: pymupdf.Document, a: Auswertung) -> None:
     gebuehren_total = sum(m.gebuehren for m in a.zahlungen)
     stift.text(x, y, "Total Gebühren", size=9, bold=True)
     stift.text(xr, y, chf(gebuehren_total), size=9, bold=True, align="right")
+
+    bi = a.beitraege
+    if bi.hat_aufteilung or bi.hat_rueckzahlungen:
+        y += 16
+        stift.linie(x, y, xr, (0.84, 0.86, 0.89), 0.6)
+        y += 16
+
+    if bi.hat_aufteilung:
+        grenze = bi.team_grenze or 0
+        stift.text(x, y, "Beiträge Team / Familien", size=10, bold=True)
+        y += 13
+        hint = (
+            f"Netto je Paycode auf Konto 3500: bis inkl. {chf(grenze, mit_waehrung=False)} CHF "
+            f"= Team, darüber = Familien."
+        )
+        for zeile in stift.umbrechen(hint, 7.5, xr - x):
+            stift.text(x, y, zeile, size=7.5, color=MUTED)
+            y += 10
+        y += 4
+        stift.text(x, y, f"Team  ·  {bi.team_anzahl}×", size=9, bold=True)
+        stift.text(xr, y, chf(bi.team_volumen), size=9, align="right")
+        y += 13
+        stift.text(x, y, f"Familien  ·  {bi.familien_anzahl}×", size=9, bold=True)
+        stift.text(xr, y, chf(bi.familien_volumen), size=9, align="right")
+        y += 16
+
+    if bi.hat_rueckzahlungen:
+        stift.text(x, y, "Rückzahlungen (3500)", size=10, bold=True)
+        y += 13
+        hint = (
+            "Bereits in den Beiträgen oben abgezogen "
+            "(Netto je Paycode auf Konto 3500)."
+        )
+        for zeile in stift.umbrechen(hint, 7.5, xr - x):
+            stift.text(x, y, zeile, size=7.5, color=MUTED)
+            y += 10
+        y += 4
+        if bi.reduktion_anzahl:
+            stift.text(
+                x, y, f"Reduktion  ·  {bi.reduktion_anzahl}×", size=9, bold=True
+            )
+            stift.text(xr, y, chf(bi.reduktion_volumen), size=9, align="right")
+            y += 13
+        if bi.rueckerstattung_anzahl:
+            stift.text(
+                x,
+                y,
+                f"Rückerstattung  ·  {bi.rueckerstattung_anzahl}×",
+                size=9,
+                bold=True,
+            )
+            stift.text(xr, y, chf(bi.rueckerstattung_volumen), size=9, align="right")
 
     # rechte Spalte
     x = right0 + pad
@@ -1870,7 +2134,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Baut die HeadWaters-Lagerabrechnung als PDF."
     )
-    p.add_argument("--kostenstelle", default="C-BTP")
+    p.add_argument("--kostenstelle", default="")
     p.add_argument("--lagername", default="")
     p.add_argument("--ort", default="")
     p.add_argument("--anreise", default="", help="TT.MM.JJJJ, z. B. 22.05.2026")
@@ -1928,6 +2192,7 @@ def lager_aus_teilen(
     kind_faktor: float | None,
     verpflegungstage: float | None,
     kueche_vom_haus: bool = False,
+    team_beitrag_max: float | None = None,
 ) -> Lagerinfo | None:
     """Baut nur, wenn wirklich alles da ist — kei stille Standard-Köpfe."""
     if not name or not ort or anreise is None or abreise is None:
@@ -1953,11 +2218,12 @@ def lager_aus_teilen(
         verpflegungstage=float(verpflegungstage),
         ort=ort.strip(),
         kueche_vom_haus=bool(kueche_vom_haus),
+        team_beitrag_max=team_beitrag_max,
     )
 
 
 def lagerinfo_abfragen(args: argparse.Namespace, gefundene_ks: str) -> Lagerinfo:
-    gespeichert = lagerinfo_laden()
+    gespeichert = lagerinfo_laden(args.kostenstelle or gefundene_ks)
     interaktiv = sys.stdin.isatty() and not args.ja
 
     print()
@@ -1994,6 +2260,7 @@ def lagerinfo_abfragen(args: argparse.Namespace, gefundene_ks: str) -> Lagerinfo
             if args.kueche_vom_haus is not None
             else (gespeichert.kueche_vom_haus if gespeichert and args.ja else False)
         ),
+        team_beitrag_max=gespeichert.team_beitrag_max if gespeichert else None,
     )
 
     if not interaktiv:
@@ -2109,6 +2376,9 @@ def lagerinfo_abfragen(args: argparse.Namespace, gefundene_ks: str) -> Lagerinfo
             kind_faktor=kind_faktor,
             verpflegungstage=verpflegungstage,
             kueche_vom_haus=kueche_vom_haus,
+            team_beitrag_max=(
+                vorschlag.team_beitrag_max if vorschlag else None
+            ),
         )
         if lager is None:
             print("   → Da fählt öppis oder d Zahle stimme nid. No einisch.")
@@ -2130,11 +2400,14 @@ def lagerinfo_abfragen(args: argparse.Namespace, gefundene_ks: str) -> Lagerinfo
         return lager
 
 
-def main() -> None:
-    args = parse_args()
-
-    if not DATA.is_dir():
-        raise SystemExit(f"Data-Ordner fehlt: {DATA}")
+def finde_datenordner() -> tuple[Path, Path, Path | None]:
+    """Neue Struktur data/xlsx + data/pdf + data/keinekostenstelle, sonst alte 2026/-2/-3."""
+    xlsx_neu = DATA / "xlsx"
+    pdf_neu = DATA / "pdf"
+    eingang_neu = DATA / "keinekostenstelle"
+    if (xlsx_neu / "Buchungsjournal.xlsx").exists() and pdf_neu.is_dir():
+        eingang = eingang_neu if (eingang_neu / "Buchungsjournal.xlsx").exists() else None
+        return xlsx_neu, pdf_neu, eingang
 
     xlsx_dir = next(
         (
@@ -2156,16 +2429,53 @@ def main() -> None:
         None,
     )
     if not xlsx_dir or not (xlsx_dir / "Buchungsjournal.xlsx").exists():
-        raise SystemExit("Kei Excel-Ordner «Kontoauszüge Buchungsperiode 2026» gfunde.")
+        raise SystemExit("Kei Excel-Ordner gfunde (data/xlsx oder Kontoauszüge 2026).")
     if not pdf_dir:
-        raise SystemExit("Kei PDF-Ordner «Kontoauszüge … 2026-2» gfunde.")
+        raise SystemExit("Kei PDF-Ordner gfunde (data/pdf oder Kontoauszüge 2026-2).")
+    return xlsx_dir, pdf_dir, eingang_dir
+
+
+def kostenstellen_im_journal(xlsx_dir: Path) -> list[str]:
+    wb = openpyxl.load_workbook(xlsx_dir / "Buchungsjournal.xlsx", data_only=True)
+    ws = wb.active
+    gefunden: set[str] = set()
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not any(row):
+            continue
+        ks = (row[8] or "").strip() if row[8] else ""
+        if ks:
+            gefunden.add(ks)
+    return sorted(gefunden)
+
+
+def main() -> None:
+    args = parse_args()
+
+    if not DATA.is_dir():
+        raise SystemExit(f"Data-Ordner fehlt: {DATA}")
+
+    xlsx_dir, pdf_dir, eingang_dir = finde_datenordner()
 
     print(f"Excel (Kostenstelle): {xlsx_dir.name}")
     print(f"PDFs:                 {pdf_dir.name}")
     if eingang_dir:
         print(f"Excel (Eingänge):     {eingang_dir.name}")
 
-    lager = lagerinfo_abfragen(args, args.kostenstelle or "C-BTP")
+    ks_liste = kostenstellen_im_journal(xlsx_dir)
+    alle_lager = lagerinfo_alle_laden()
+    default_ks = (
+        args.kostenstelle
+        or (ks_liste[0] if len(ks_liste) == 1 else "")
+        or (alle_lager[-1].kostenstelle if alle_lager else "")
+        or "C-BTP"
+    )
+    if ks_liste:
+        print(f"Kostenstellen im Journal: {', '.join(ks_liste)}")
+    if alle_lager:
+        bekannte = ", ".join(f"{l.kostenstelle} ({l.name})" for l in alle_lager)
+        print(f"Gspeichereti Lager:       {bekannte}")
+
+    lager = lagerinfo_abfragen(args, default_ks)
     print()
     print(f"→ Lese Buchungen für {lager.kostenstelle} …")
 
@@ -2200,8 +2510,9 @@ def main() -> None:
 
     if not LOGO_DATEI.exists():
         raise SystemExit(f"Logo fehlt: {LOGO_DATEI}")
-    if not BTP_ICON_DATEI.exists():
-        raise SystemExit(f"Lager-Icon fehlt: {BTP_ICON_DATEI}")
+    icon = LAGER_ICONS.get(lager.kostenstelle.upper())
+    if icon and not icon.exists():
+        raise SystemExit(f"Lager-Icon fehlt: {icon}")
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     print("→ Baue PDF …")
@@ -2226,6 +2537,25 @@ def main() -> None:
             f"    {m.name:28} {m.anzahl:3}×  {chf(m.volumen):>14}"
             f"   Gebühr {chf(m.gebuehren)}"
         )
+    bi = auswertung.beitraege
+    if bi.hat_aufteilung:
+        print(
+            f"  Beiträge Team:     {bi.team_anzahl}×  {chf(bi.team_volumen)}"
+            f"  (≤ {chf(bi.team_grenze or 0)})"
+        )
+        print(
+            f"  Beiträge Familien: {bi.familien_anzahl}×  {chf(bi.familien_volumen)}"
+        )
+    if bi.hat_rueckzahlungen:
+        if bi.reduktion_anzahl:
+            print(
+                f"  Reduktionen:       {bi.reduktion_anzahl}×  {chf(bi.reduktion_volumen)}"
+            )
+        if bi.rueckerstattung_anzahl:
+            print(
+                f"  Rückerstattungen:  {bi.rueckerstattung_anzahl}×  "
+                f"{chf(bi.rueckerstattung_volumen)}"
+            )
 
 
 if __name__ == "__main__":

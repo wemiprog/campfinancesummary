@@ -4,5 +4,11 @@ output/
 __pycache__/
 *.pyc
 .python-version
-data/
-!data/.gitkeep
+data/Belege/*
+!data/Belege/.gitkeep
+data/keinekostenstelle/*
+!data/keinekostenstelle/.gitkeep
+data/pdf/*
+!data/pdf/.gitkeep
+data/xlsx/*
+!data/xlsx/.gitkeep
